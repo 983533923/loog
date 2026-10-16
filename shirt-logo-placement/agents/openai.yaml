@@ -1,0 +1,4 @@
+interface:
+  display_name: "服装批量贴 logo"
+  short_description: "把 logo 贴到服装商品图的胸口位置，不改衣服本身"
+  default_prompt: "用这张 logo 给我项目里的服装图批量贴上胸口 logo"
