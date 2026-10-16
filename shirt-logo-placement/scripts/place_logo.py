@@ -18,9 +18,13 @@
 
 落位描述（plan 里每个条目的字段）：
     center   [cx, cy]      归一化(<=1.5)或像素
+                           cx 可写 "auto"：此时用 shirt_x0 + ratio_x × shirt_w 自动算出水平位置，
+                           避免手工定错横向落点（ratio_x 默认 0.65，即衣服横向 65% 处）
     width    W             logo 宽度：<=1.5 视为占图宽比例，否则像素
     或            shirt_w 衣服宽度（归一化或像素）+ ratio，logo 宽度 = shirt_w * ratio
                             —— 同款图片统一用同一个 ratio，可保证各图 logo 视觉大小一致
+    shirt_x0 衣服左边缘（归一化或像素）  给定时会在报告里回显 logo 中心落在衣服横向的百分比，
+                           并在偏离 0.62–0.70 区间（贴到正中央或过分靠边）时给出 warning
     angle    deg           顺时针为正，0 = 水平
     quad     [[x,y]*4]     直接给四角（左上→右上→右下→左下），优先级最高
     skip     true          跳过该图，可附 reason
@@ -112,7 +116,13 @@ def resolve_quad(spec: dict, size, aspect: float):
             quad = [(p[0] * w, p[1] * h) for p in quad]
         return quad
 
-    cx = _px(spec["center"][0], w)
+    cx_raw = spec["center"][0]
+    if isinstance(cx_raw, str) and cx_raw.lower() == "auto":
+        if "shirt_x0" not in spec or "shirt_w" not in spec:
+            raise ValueError('center 的 x 写 "auto" 时必须同时给出 shirt_x0 与 shirt_w')
+        cx = _px(spec["shirt_x0"], w) + float(spec.get("ratio_x", 0.65)) * _px(spec["shirt_w"], w)
+    else:
+        cx = _px(cx_raw, w)
     cy = _px(spec["center"][1], h)
     if "width" in spec:
         width = _px(spec["width"], w)
@@ -241,6 +251,19 @@ def process_file(src: Path, logo: Image.Image, spec: dict, dst: Path):
             params = {k: one[k] for k in ("mode", "opacity", "light_follow", "texture_keep",
                                           "feather", "shadow") if k in one}
             result, info = composite(result, logo, quad, **params)
+            if "shirt_x0" in one and "shirt_w" in one:
+                w = result.width
+                x0 = _px(one["shirt_x0"], w)
+                sw = _px(one["shirt_w"], w)
+                cx = (info["logo_box_px"][0] + info["logo_box_px"][2]) / 2.0
+                ratio = (cx - x0) / sw
+                info["logo_center_ratio_in_shirt"] = round(ratio, 3)
+                if ratio < 0.55:
+                    info["warning"] = (f"logo 中心落在衣服横向 {ratio:.0%} 处，过于靠中间；"
+                                       "应落在 62%–70% 处（穿衣人左胸）")
+                elif ratio > 0.78:
+                    info["warning"] = (f"logo 中心落在衣服横向 {ratio:.0%} 处，过分靠边；"
+                                       "应落在 62%–70% 处")
             infos.append(info)
         save_image(result, dst)
     if len(infos) == 1:
@@ -298,7 +321,9 @@ def main(argv=None):
     ap.add_argument("--center")
     ap.add_argument("--width", type=float)
     ap.add_argument("--shirt-w", type=float)
+    ap.add_argument("--shirt-x0", type=float, help="衣服左边缘（归一化或像素），用于位置自检")
     ap.add_argument("--ratio", type=float, default=0.088)
+    ap.add_argument("--ratio-x", type=float, default=0.65, help="center 写 auto 时的横向落点比例")
     ap.add_argument("--angle", type=float, default=0.0)
     ap.add_argument("--mode", default="auto",
                     choices=["auto", "normal", "multiply", "screen", "overlay"])
@@ -347,16 +372,21 @@ def main(argv=None):
     if args.quad:
         spec["quad"] = [[float(v) for v in chunk.split(",")]
                         for chunk in args.quad.replace(";", " ").split()]
-    elif args.center and args.width:
-        spec["center"] = [float(v) for v in args.center.split(",")]
-        spec["width"] = args.width
-    elif args.center and args.shirt_w:
-        spec["center"] = [float(v) for v in args.center.split(",")]
-        spec["shirt_w"] = args.shirt_w
-        spec["ratio"] = args.ratio
+    elif args.center and (args.width or args.shirt_w):
+        cx_str, cy_str = args.center.split(",")
+        cx_str = cx_str.strip()
+        spec["center"] = [cx_str if cx_str.lower() == "auto" else float(cx_str), float(cy_str)]
+        if args.width:
+            spec["width"] = args.width
+        if args.shirt_w:
+            spec["shirt_w"] = args.shirt_w
+            spec["ratio"] = args.ratio
     else:
         print("需要 --quad，或 --center 搭配 --width / --shirt-w", file=sys.stderr)
         return 2
+    if args.shirt_x0 is not None:
+        spec["shirt_x0"] = args.shirt_x0
+    spec["ratio_x"] = args.ratio_x
     spec["angle"] = args.angle
 
     src = Path(args.image)
